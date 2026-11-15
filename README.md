@@ -13,16 +13,33 @@ visitor's browser ──► GitHub Pages site (docs/)
                           └──► codex exec  (Codex)
 ```
 
+## Models and tools
+
+- `server/models.json` lists every Claude model the subscription can use (13) and every Codex model (8).
+- The AI can use two tools for math and coding: **run_python** (Python 3.12 with numpy, scipy, sympy,
+  mpmath, networkx, pandas, matplotlib, z3) and **run_lean** (Lean 4 + Mathlib). Each run shows up in the
+  chat as a collapsible box with the code and output. Installed under `server/runtime/tools/` (~10 GB).
+- On this 8 GB laptop, Lean with `import Mathlib` takes ~2 minutes; narrower imports take ~40 s.
+
+## Access code
+
+If `ACCESS_CODE` is set in `server/.env`, visitors type it once per browser tab; the server hands back a
+session that lasts `SESSION_HOURS` (default 24). 5 wrong codes from one address locks it out for 10 minutes.
+
 ## Lockdown
 
 The CLIs are agents that can normally run commands and read files, so every run is restricted:
 
-1. **No tools.** Claude runs with `--tools ""`, no MCP servers, no settings or slash commands.
-   Codex runs with its shell, code-mode, browser, computer-use, plugin, and sub-agent features off.
+1. **Only our tools.** Claude runs with `--tools ""` (no built-in tools), no settings or slash commands, and
+   only the `run_python` / `run_lean` MCP tools from `server/mcp_tools.py`. Codex runs with its shell,
+   code-mode, browser, computer-use, plugin, and sub-agent features off, plus the same two tools.
 2. **Separate config.** The server's Claude and Codex use their own login and settings in
    `server/runtime/`, so your personal CLI config, plugins, and chat history are never loaded.
-3. **macOS sandbox.** Each run is wrapped in `sandbox-exec` with a profile that blocks reading or
+3. **macOS sandbox.** Each CLI run is wrapped in `sandbox-exec` with a profile that blocks reading or
    writing anything in your home folder except `server/runtime/`.
+4. **Stricter sandbox for code.** Python/Lean code runs through a private runner (127.0.0.1:8788, secret
+   per server start, not reachable from the internet) inside a sandbox with no network, no access to
+   /Users except the tools, no other programs, a scratch folder only, and time limits (`server/executor.py`).
 
 ## Running it
 
