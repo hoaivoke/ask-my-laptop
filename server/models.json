@@ -1,0 +1,38 @@
+[
+  {
+    "id": "claude-opus",
+    "label": "Claude Opus 5.5",
+    "description": "Anthropic's smartest everyday model",
+    "provider": "anthropic",
+    "model": "claude-opus-5-5",
+    "effort": "low",
+    "max_tokens": 8000
+  },
+  {
+    "id": "claude-sonnet",
+    "label": "Claude Sonnet 5.5",
+    "description": "Fast and capable",
+    "provider": "anthropic",
+    "model": "claude-sonnet-5-5",
+    "effort": "low",
+    "max_tokens": 8000
+  },
+  {
+    "id": "claude-haiku",
+    "label": "Claude Haiku 5.5",
+    "description": "Quickest and cheapest",
+    "provider": "anthropic",
+    "model": "claude-haiku-5-5",
+    "effort": "low",
+    "max_tokens": 8000
+  },
+  {
+    "id": "codex",
+    "label": "Codex (OpenAI)",
+    "description": "OpenAI's coding model",
+    "provider": "openai",
+    "model": "gpt-5-codex",
+    "effort": "low",
+    "max_tokens": 8000
+  }
+]
