@@ -29,9 +29,12 @@ ELAN = TOOLS / "elan"
 MATHPROJ = TOOLS / "mathproj"
 PROFILE = RUNTIME / "exec.sb"
 INSTALL_PROFILE = RUNTIME / "install.sb"
+BUILD_PROFILE = RUNTIME / "build.sb"     # owner-approved installs: may run compilers too
 UV = TOOLS / "bin" / "uv"
 UV_CACHE = TOOLS / "uv-cache"
 INSTALLED = TOOLS / "installed.json"     # the list of packages the AI added, and why
+REQUESTS = TOOLS / "requests.json"       # tools the AI couldn't add itself, waiting for the owner
+REQUESTS_MD = HERE / "logs" / "tool-requests.md"   # readable copy of the above
 
 BASE_PACKAGES = ["numpy", "scipy", "sympy", "mpmath", "networkx", "pandas", "matplotlib", "z3-solver"]
 MAX_TOOLS_MB = 4000                      # stop auto-installing once the Python tools folder is this big
@@ -103,7 +106,9 @@ def write_profile():
         UV.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_uv, UV)       # keep the installer inside the tools folder
     PROFILE.write_text(_profile(network=False, writable=[JOBS]))
-    INSTALL_PROFILE.write_text(_profile(network=True, writable=[JOBS, TOOLS / "py", UV_CACHE]))
+    install = _profile(network=True, writable=[JOBS, TOOLS / "py", UV_CACHE])
+    INSTALL_PROFILE.write_text(install)
+    BUILD_PROFILE.write_text(install + "(allow process-exec)\n")
 
 
 def lean_env():
@@ -228,7 +233,19 @@ def tool_list():
     return ", ".join(BASE_PACKAGES + extra)
 
 
-def install_packages(names, reason="", asked_by=""):
+def install_packages(names, reason="", asked_by="", allow_build=False, owner=False):
+    """Install packages. If the AI's install fails for a fixable reason, it's logged for approval."""
+    res = _install(names, reason, asked_by, allow_build, owner)
+    if not res.get("ok") and not owner and res.get("loggable"):
+        ids = [log_request(n.split("==")[0], "python-package", reason, asked_by, res.get("message", ""))
+               for n in names]
+        res["message"] += ("\n\nLogged for the owner to approve later (request %s)."
+                           % ", ".join("#%s" % i[0] for i in ids if i))
+        res["logged"] = True
+    return res
+
+
+def _install(names, reason, asked_by, allow_build, owner):
     names = [str(n).strip() for n in (names or []) if str(n).strip()]
     if not names or len(names) > 5:
         return {"ok": False, "message": "Give 1 to 5 package names."}
@@ -239,26 +256,29 @@ def install_packages(names, reason="", asked_by=""):
         return {"ok": False, "message": "The installer isn't set up on this server."}
     today = datetime.now().strftime("%Y-%m-%d")
     log = _load_installed()
-    if sum(1 for e in log if e.get("date", "").startswith(today)) >= MAX_INSTALLS_PER_DAY:
-        return {"ok": False, "message": "Daily install limit reached. Ask the owner to add it."}
-    if _dir_mb(TOOLS / "py") > MAX_TOOLS_MB:
-        return {"ok": False, "message": "The tools folder is full. Ask the owner to add it."}
+    if not owner and sum(1 for e in log if e.get("date", "").startswith(today)) >= MAX_INSTALLS_PER_DAY:
+        return {"ok": False, "loggable": True, "message": "Daily auto-install limit reached."}
+    if not owner and _dir_mb(TOOLS / "py") > MAX_TOOLS_MB:
+        return {"ok": False, "loggable": True, "message": "The tools folder is at its size limit."}
     if not _install_lock.acquire(timeout=INSTALL_SECONDS):
         return {"ok": False, "message": "Another install is running. Try again shortly."}
     job = Path(tempfile.mkdtemp(prefix="install-", dir=JOBS))
     try:
         before = _versions()
-        env = {"PATH": "/usr/bin:/bin", "HOME": str(job), "TMPDIR": str(job), "UV_CACHE_DIR": str(UV_CACHE),
+        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(job), "TMPDIR": str(job), "UV_CACHE_DIR": str(UV_CACHE),
                "UV_NO_CONFIG": "1", "UV_PYTHON_DOWNLOADS": "never", "SSL_CERT_FILE": "/etc/ssl/cert.pem"}
-        cmd = ["/usr/bin/sandbox-exec", "-f", str(INSTALL_PROFILE), str(UV), "pip", "install",
-               "--python", str(PY), "--no-build", "--no-config", "--index-url", "https://pypi.org/simple"] + names
+        profile = BUILD_PROFILE if allow_build else INSTALL_PROFILE
+        cmd = ["/usr/bin/sandbox-exec", "-f", str(profile), str(UV), "pip", "install",
+               "--python", str(PY), "--no-config", "--index-url", "https://pypi.org/simple"] \
+            + ([] if allow_build else ["--no-build"]) + names
         try:
             r = subprocess.run(cmd, cwd=str(job), env=env, capture_output=True, text=True, timeout=INSTALL_SECONDS)
             out, code = (r.stdout + r.stderr)[-4000:], r.returncode
         except subprocess.TimeoutExpired:
-            return {"ok": False, "message": "The install took too long and was stopped."}
+            return {"ok": False, "loggable": True, "message": "The install took too long and was stopped."}
         if code != 0:
-            return {"ok": False, "message": "Install failed (only prebuilt wheels are allowed):\n" + out}
+            return {"ok": False, "loggable": True,
+                    "message": "Install failed%s:\n%s" % ("" if allow_build else " (auto-install only takes prebuilt wheels)", out)}
         after = _versions()
         added = {k: v for k, v in after.items() if before.get(k) != v}
         now = datetime.now().isoformat(timespec="seconds")
@@ -266,6 +286,7 @@ def install_packages(names, reason="", asked_by=""):
             key = re.sub(r"[-_.]+", "-", n.split("==")[0]).lower()
             log.append({"package": key, "version": after.get(key, "?"), "date": now,
                         "reason": str(reason)[:300], "asked_by": str(asked_by)[:300],
+                        "approved_by_owner": owner,
                         "also_installed": sorted("%s==%s" % kv for kv in added.items() if kv[0] != key)})
         INSTALLED.write_text(json.dumps(log, indent=1))
         return {"ok": True, "installed": {k: after.get(re.sub(r"[-_.]+", "-", k.split("==")[0]).lower())
@@ -276,6 +297,99 @@ def install_packages(names, reason="", asked_by=""):
     finally:
         _install_lock.release()
         shutil.rmtree(job, ignore_errors=True)
+
+
+# ------------------------------------------- requests needing approval ---
+_req_lock = threading.Lock()
+
+
+def _load_requests():
+    try:
+        return json.loads(REQUESTS.read_text())
+    except (FileNotFoundError, ValueError):
+        return []
+
+
+def _save_requests(reqs):
+    REQUESTS.write_text(json.dumps(reqs, indent=1))
+    lines = ["# Tool requests", "",
+             "Tools the AI couldn't add by itself. Approve or reject with:", "",
+             "    python3 ~/ask-my-laptop/server/tools_admin.py approve ID",
+             "    python3 ~/ask-my-laptop/server/tools_admin.py reject ID", ""]
+    for status in ("pending", "approved", "rejected", "installed"):
+        group = [r for r in reqs if r["status"] == status]
+        if not group:
+            continue
+        lines += ["## %s (%d)" % (status.capitalize(), len(group)), ""]
+        for r in group:
+            lines.append("- **#%d %s** (%s), asked %d time%s, first %s" % (
+                r["id"], r["name"], r["kind"], r["count"], "" if r["count"] == 1 else "s", r["first"][:16]))
+            lines.append("  - Why: %s" % (r["reasons"][-1] if r["reasons"] else "-"))
+            if r.get("error"):
+                lines.append("  - Auto-install failed: %s" % r["error"][:200].replace("\n", " "))
+            for qn in r["questions"][-3:]:
+                lines.append("  - Question: %s" % qn[:200].replace("\n", " "))
+            if r.get("note"):
+                lines.append("  - Note: %s" % r["note"])
+        lines.append("")
+    REQUESTS_MD.parent.mkdir(exist_ok=True)
+    REQUESTS_MD.write_text("\n".join(lines))
+
+
+def log_request(name, kind, reason="", asked_by="", error=""):
+    """Record (or bump) a request for a tool the AI couldn't add. Returns its id."""
+    name = str(name).strip()[:100]
+    kind = kind if kind in ("python-package", "program", "other") else "other"
+    if not name:
+        return None
+    now = datetime.now().isoformat(timespec="seconds")
+    with _req_lock:
+        reqs = _load_requests()
+        key = name.lower()
+        r = next((x for x in reqs if x["name"].lower() == key and x["kind"] == kind
+                  and x["status"] in ("pending", "rejected")), None)
+        if r is None:
+            r = {"id": max([x["id"] for x in reqs] or [0]) + 1, "name": name, "kind": kind,
+                 "status": "pending", "count": 0, "first": now, "reasons": [], "questions": [], "error": ""}
+            reqs.append(r)
+        r["count"] += 1
+        r["last"] = now
+        if reason and reason not in r["reasons"]:
+            r["reasons"] = (r["reasons"] + [str(reason)[:300]])[-5:]
+        if asked_by and asked_by not in r["questions"]:
+            r["questions"] = (r["questions"] + [str(asked_by)[:300]])[-10:]
+        if error:
+            r["error"] = str(error)[-600:]
+        _save_requests(reqs)
+        return r["id"], r["status"]
+
+
+def set_request_status(req_id, status, note=""):
+    with _req_lock:
+        reqs = _load_requests()
+        r = next((x for x in reqs if x["id"] == req_id), None)
+        if r:
+            r["status"] = status
+            if note:
+                r["note"] = note
+            _save_requests(reqs)
+        return r
+
+
+def approve_request(req_id):
+    """Owner approval. Python packages get installed (source builds allowed); others are marked."""
+    r = next((x for x in _load_requests() if x["id"] == req_id), None)
+    if not r:
+        return "No request #%s." % req_id
+    if r["kind"] != "python-package":
+        set_request_status(req_id, "approved", "Needs manual setup (ask Claude Code to install it).")
+        return "Marked #%d %s as approved. It isn't a Python package, so it needs a manual install." % (req_id, r["name"])
+    res = install_packages([r["name"]], "Approved by the owner: " + (r["reasons"][-1] if r["reasons"] else ""),
+                           r["questions"][-1] if r["questions"] else "", allow_build=True, owner=True)
+    if res.get("ok"):
+        set_request_status(req_id, "installed", "Installed %s" % res["installed"])
+        return "Installed %s." % res["installed"]
+    return "Install still failed: %s" % res.get("message", "")[-800:]
 
 
 if __name__ == "__main__":   # quick manual test: python3 executor.py python 'print(1)'

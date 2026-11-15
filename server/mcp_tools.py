@@ -70,6 +70,27 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "request_tool",
+        "description": (
+            "Ask the site owner to add a tool you can't add yourself: a program that isn't a Python "
+            "package (e.g. R, SageMath, GAP, Julia, Macaulay2, a LaTeX package), or anything else "
+            "the question genuinely needs. The request goes on a list the owner approves later. "
+            "After calling it, tell the visitor it has been requested, and still help as much as "
+            "you can without it. (Failed install_python_package calls are logged automatically, "
+            "so you don't need this for those.)"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The tool, e.g. \"SageMath\" or \"R\""},
+                "kind": {"type": "string", "enum": ["program", "python-package", "other"]},
+                "reason": {"type": "string", "description": "One sentence: what the question needs it for"},
+            },
+            "required": ["name", "kind", "reason"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -137,6 +158,17 @@ def handle(msg):
                     text += "\nYou can now import it in run_python."
                 else:
                     text = "Not installed: " + res.get("message", "unknown error")
+                    if res.get("logged"):
+                        text += ("\nTell the visitor the package has been requested from the site owner, "
+                                 "and help as much as you can without it.")
+                return {"content": [{"type": "text", "text": text}], "isError": not res.get("ok")}
+            except Exception as e:
+                return {"content": [{"type": "text", "text": "Tool error: %s" % e}], "isError": True}
+        if name == "request_tool":
+            try:
+                res = post("/request", {"name": args.get("name", ""), "kind": args.get("kind", "other"),
+                                        "reason": args.get("reason", ""), "request_id": REQUEST_ID})
+                text = res.get("message", "Logged.")
                 return {"content": [{"type": "text", "text": text}], "isError": not res.get("ok")}
             except Exception as e:
                 return {"content": [{"type": "text", "text": "Tool error: %s" % e}], "isError": True}

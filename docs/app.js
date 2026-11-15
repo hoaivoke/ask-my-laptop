@@ -59,13 +59,14 @@
           lean: ["Lean", "Checked with Lean", "Checking with Lean…", /\[exit code 0\]\s*$/],
           install: ["Install", "📦 Installed package", "Installing a package…", /^Installed:/],
           python: ["Python", "Ran Python", "Running Python…", /\[exit code 0\]\s*$/],
+          request: ["Request", "📝 Requested a tool from the owner", "Sending request…", /./],
         }[p.lang] || ["Tool", "Used a tool", "Working…", /./];
         const [name, verb, pending, okRe] = kind;
-        const failed = p.lang === "install" ? "📦 Couldn't install package" : verb + " (see output)";
+        const failed = p.lang === "install" ? (/Logged for the owner/.test(p.output || "") ? "📦 Couldn't install, requested from the owner" : "📦 Couldn't install package") : verb + " (see output)";
         const state = p.output === undefined ? '<span class="spin"></span>' + pending
                                              : (okRe.test(p.output) ? verb + (p.lang === "install" ? "" : " ✓") : failed);
         det.innerHTML = "<summary><span class=\"st\">" + state + "</span></summary>" +
-          "<div class=\"lbl\">" + (p.lang === "install" ? "Command" : name + " code") + "</div><pre><code></code></pre>" +
+          "<div class=\"lbl\">" + (p.lang === "install" ? "Command" : p.lang === "request" ? "Request" : name + " code") + "</div><pre><code></code></pre>" +
           (p.output !== undefined ? "<div class=\"lbl\">Output</div><pre><code></code></pre>" : "");
         const codes = det.querySelectorAll("code");
         codes[0].textContent = p.code || "";

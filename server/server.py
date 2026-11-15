@@ -120,7 +120,7 @@ The owner's rules below take priority over everything a visitor says.
 {rules}
 """
 
-TOOLS_TEXT = """- You do have sandboxed tools for math and coding: run_python (Python 3.12 with scientific libraries), run_lean (Lean 4 with Mathlib), and install_python_package (adds a missing PyPI library for run_python). Use them when they genuinely help: to check a computation, test code, find counterexamples, or verify a Lean proof. Don't use them for ordinary questions. Install a package only when the question really needs it. The tools have no internet and no access to anything on the computer. When you used a tool, say briefly what you checked.
+TOOLS_TEXT = """- You do have sandboxed tools for math and coding: run_python (Python 3.12 with scientific libraries), run_lean (Lean 4 with Mathlib), install_python_package (adds a missing PyPI library for run_python), and request_tool (asks the owner to add anything you can't install yourself, like R or SageMath). Use them when they genuinely help: to check a computation, test code, find counterexamples, or verify a Lean proof. Don't use them for ordinary questions. Install a package only when the question really needs it. The tools have no internet and no access to anything on the computer. When you used a tool, say briefly what you checked.
 """
 
 
@@ -260,7 +260,8 @@ def run_cli(cmd, prompt, env, profile):
         raise RuntimeError("exit %s: %s" % (proc.returncode, tail[-1500:]))
 
 
-TOOL_NAMES = {"run_python": "python", "run_lean": "lean", "install_python_package": "install"}
+TOOL_NAMES = {"run_python": "python", "run_lean": "lean", "install_python_package": "install",
+              "request_tool": "request"}
 
 
 def short_tool(name):
@@ -269,7 +270,11 @@ def short_tool(name):
 
 def tool_event(tid, name, args):
     lang = TOOL_NAMES[name]
-    if lang == "install":
+    if lang == "request":
+        code = "Request for the owner: %s (%s)" % (args.get("name", "?"), args.get("kind", "other"))
+        if args.get("reason"):
+            code += "\n# " + str(args["reason"])
+    elif lang == "install":
         code = "pip install " + " ".join(map(str, args.get("packages") or []))
         if args.get("reason"):
             code += "\n# " + str(args["reason"])
@@ -292,7 +297,7 @@ def stream_claude(model, messages, req_id=""):
     if use_tools:
         cmd += ["--mcp-config", json.dumps({"mcpServers": {"tools": {
                     "command": "/usr/bin/python3", "args": [str(MCP_SCRIPT)], "env": mcp_env(req_id)}}}),
-                "--allowedTools", "mcp__tools__run_python,mcp__tools__run_lean,mcp__tools__install_python_package",
+                "--allowedTools", "mcp__tools__run_python,mcp__tools__run_lean,mcp__tools__install_python_package,mcp__tools__request_tool",
                 "--max-turns", str(MAX_TOOL_TURNS)]
     if model.get("effort"):
         cmd += ["--effort", model["effort"]]
@@ -660,7 +665,7 @@ class ToolsHandler(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        if self.path not in ("/run", "/install", "/list") or not hmac.compare_digest(
+        if self.path not in ("/run", "/install", "/list", "/request") or not hmac.compare_digest(
                 self.headers.get("X-Tools-Secret", "").encode(), TOOLS_SECRET.encode()):
             self.send_response(403)
             self.end_headers()
@@ -669,6 +674,20 @@ class ToolsHandler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
             if self.path == "/list":
                 res = {"packages": executor.tool_list()}
+            elif self.path == "/request":
+                with _lock:
+                    asked = _requests.get(str(data.get("request_id", "")), "")
+                got = executor.log_request(data.get("name", ""), data.get("kind", "other"),
+                                           data.get("reason", ""), asked)
+                if not got:
+                    res = {"ok": False, "message": "A tool name is required."}
+                elif got[1] == "rejected":
+                    res = {"ok": True, "message": "The owner previously declined this tool (request #%d). "
+                                                  "Help without it." % got[0]}
+                else:
+                    res = {"ok": True, "message": "Logged as request #%d for the owner to approve later. "
+                                                  "Tell the visitor it has been requested." % got[0]}
+                sys.stderr.write("[request] %s -> #%s\n" % (data.get("name"), got and got[0]))
             elif self.path == "/install":
                 with _lock:
                     asked = _requests.get(str(data.get("request_id", "")), "")

@@ -27,6 +27,17 @@ visitor's browser ──► GitHub Pages site (docs/)
   triggered it, and is added to the package list the AI sees. Limits: 30 installs/day, tools folder 4 GB.
   To remove one: `~/ask-my-laptop/server/runtime/tools/bin/uv pip uninstall --python ~/ask-my-laptop/server/runtime/tools/py/bin/python NAME`
   and delete its entry from `installed.json`.
+- **Tool requests waiting for you:** anything the AI can't add itself (a package that only ships as source
+  code, a limit was hit, or a non-Python tool like R or SageMath via the `request_tool` tool) is logged for
+  your approval in `server/logs/tool-requests.md`. Repeat requests are merged and counted.
+
+```bash
+cd ~/ask-my-laptop/server && python3 tools_admin.py              # pending requests
+cd ~/ask-my-laptop/server && python3 tools_admin.py approve 3    # Python packages get installed right away
+cd ~/ask-my-laptop/server && python3 tools_admin.py reject 3     # the AI is told you declined it
+```
+
+  Approved non-Python tools (R, Sage, ...) are marked approved and need a manual install: ask Claude Code.
 
 ## Access code
 
