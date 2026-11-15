@@ -20,11 +20,18 @@ visitor's browser ──► GitHub Pages site (docs/)
   mpmath, networkx, pandas, matplotlib, z3) and **run_lean** (Lean 4 + Mathlib). Each run shows up in the
   chat as a collapsible box with the code and output. Installed under `server/runtime/tools/` (~10 GB).
 - On this 8 GB laptop, Lean with `import Mathlib` takes ~2 minutes; narrower imports take ~40 s.
+- **Auto-added packages:** if a question needs a Python library that isn't installed, the AI calls
+  `install_python_package`. It installs from PyPI (prebuilt wheels only, so no code runs during install)
+  inside its own sandbox (HTTPS out only; writes only to the tools Python), then uses it. Every install is
+  recorded in `server/runtime/tools/installed.json` with version, the AI's reason, and the question that
+  triggered it, and is added to the package list the AI sees. Limits: 30 installs/day, tools folder 4 GB.
+  To remove one: `~/ask-my-laptop/server/runtime/tools/bin/uv pip uninstall --python ~/ask-my-laptop/server/runtime/tools/py/bin/python NAME`
+  and delete its entry from `installed.json`.
 
 ## Access code
 
 If `ACCESS_CODE` is set in `server/.env`, visitors type it once per browser tab; the server hands back a
-session that lasts `SESSION_HOURS` (default 24). 5 wrong codes from one address locks it out for 10 minutes.
+session that lasts `SESSION_HOURS` (default 24) and survives server restarts. 5 wrong codes from one address locks it out for 10 minutes.
 
 ## Lockdown
 

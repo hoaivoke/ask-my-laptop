@@ -55,12 +55,17 @@
         const d = document.createElement("div"); d.className = "md"; d.innerHTML = render(p.text); el.appendChild(d);
       } else {
         const det = document.createElement("details"); det.className = "tool";
-        const name = p.lang === "lean" ? "Lean" : "Python";
-        const verb = p.lang === "lean" ? "Checked with Lean" : "Ran Python";
-        const state = p.output === undefined ? '<span class="spin"></span>' + (p.lang === "lean" ? "Checking with Lean…" : "Running Python…")
-                                             : verb + (/\[exit code 0\]\s*$/.test(p.output) ? " ✓" : " (see output)");
+        const kind = {
+          lean: ["Lean", "Checked with Lean", "Checking with Lean…", /\[exit code 0\]\s*$/],
+          install: ["Install", "📦 Installed package", "Installing a package…", /^Installed:/],
+          python: ["Python", "Ran Python", "Running Python…", /\[exit code 0\]\s*$/],
+        }[p.lang] || ["Tool", "Used a tool", "Working…", /./];
+        const [name, verb, pending, okRe] = kind;
+        const failed = p.lang === "install" ? "📦 Couldn't install package" : verb + " (see output)";
+        const state = p.output === undefined ? '<span class="spin"></span>' + pending
+                                             : (okRe.test(p.output) ? verb + (p.lang === "install" ? "" : " ✓") : failed);
         det.innerHTML = "<summary><span class=\"st\">" + state + "</span></summary>" +
-          "<div class=\"lbl\">" + name + " code</div><pre><code></code></pre>" +
+          "<div class=\"lbl\">" + (p.lang === "install" ? "Command" : name + " code") + "</div><pre><code></code></pre>" +
           (p.output !== undefined ? "<div class=\"lbl\">Output</div><pre><code></code></pre>" : "");
         const codes = det.querySelectorAll("code");
         codes[0].textContent = p.code || "";

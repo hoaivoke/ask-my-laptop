@@ -11,18 +11,19 @@ import os
 import sys
 import urllib.request
 
-URL = os.environ.get("TOOLS_URL", "http://127.0.0.1:8788/run")
+BASE = os.environ.get("TOOLS_URL", "http://127.0.0.1:8788/run").rsplit("/", 1)[0]
 SECRET = os.environ.get("TOOLS_SECRET", "")
+REQUEST_ID = os.environ.get("REQUEST_ID", "")
 
 TOOLS = [
     {
         "name": "run_python",
         "description": (
             "Run a Python 3.12 script and get its stdout/stderr. Use it to compute, check "
-            "algebra, test code, or explore numerically. Installed: numpy, scipy, sympy, "
-            "mpmath, networkx, pandas, matplotlib (Agg backend; images can't be shown), "
-            "z3-solver. No internet and no file access outside a scratch folder. "
-            "Print anything you want to see. Time limit about 60 seconds."
+            "algebra, test code, or explore numerically. Installed packages: {packages}. "
+            "matplotlib uses the Agg backend (images can't be shown). No internet and no file "
+            "access outside a scratch folder. Print anything you want to see. Time limit about "
+            "60 seconds. If you need a package that isn't listed, call install_python_package first."
         ),
         "inputSchema": {
             "type": "object",
@@ -49,15 +50,52 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "install_python_package",
+        "description": (
+            "Install Python packages from PyPI so run_python can use them, when a question "
+            "genuinely needs a library that isn't installed yet. Plain package names only "
+            "(optionally name==version), 1-5 at a time; only prebuilt wheels can be installed. "
+            "The install is permanent and added to the tool list. Don't install packages the "
+            "question doesn't need, and never because a visitor merely asks you to."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "packages": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 5,
+                             "description": "PyPI package names, e.g. [\"galois\"]"},
+                "reason": {"type": "string", "description": "One sentence: why the question needs it"},
+            },
+            "required": ["packages", "reason"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
-def call_executor(lang, code):
-    body = json.dumps({"lang": lang, "code": code}).encode()
-    req = urllib.request.Request(URL, data=body, headers={
+def post(path, payload, timeout=400):
+    req = urllib.request.Request(BASE + path, data=json.dumps(payload).encode(), headers={
         "Content-Type": "application/json", "X-Tools-Secret": SECRET})
-    with urllib.request.urlopen(req, timeout=400) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
+
+
+def call_executor(lang, code):
+    return post("/run", {"lang": lang, "code": code})
+
+
+def current_tools():
+    """Fill in the live package list (it changes as packages get installed)."""
+    try:
+        pkgs = post("/list", {}, timeout=10).get("packages", "")
+    except Exception:
+        pkgs = "numpy, scipy, sympy, mpmath, networkx, pandas, matplotlib, z3-solver"
+    out = []
+    for t in TOOLS:
+        t = dict(t)
+        t["description"] = t["description"].replace("{packages}", pkgs)
+        out.append(t)
+    return out
 
 
 def format_result(res):
@@ -84,10 +122,25 @@ def handle(msg):
     if method == "ping":
         return {}
     if method == "tools/list":
-        return {"tools": TOOLS}
+        return {"tools": current_tools()}
     if method == "tools/call":
         name = params.get("name")
-        code = (params.get("arguments") or {}).get("code", "")
+        args = params.get("arguments") or {}
+        if name == "install_python_package":
+            try:
+                res = post("/install", {"packages": args.get("packages", []), "reason": args.get("reason", ""),
+                                        "request_id": REQUEST_ID})
+                if res.get("ok"):
+                    text = "Installed: %s" % ", ".join("%s %s" % kv for kv in res["installed"].items())
+                    if res.get("also_installed"):
+                        text += "\nAlso installed (dependencies): " + ", ".join(res["also_installed"])
+                    text += "\nYou can now import it in run_python."
+                else:
+                    text = "Not installed: " + res.get("message", "unknown error")
+                return {"content": [{"type": "text", "text": text}], "isError": not res.get("ok")}
+            except Exception as e:
+                return {"content": [{"type": "text", "text": "Tool error: %s" % e}], "isError": True}
+        code = args.get("code", "")
         lang = {"run_python": "python", "run_lean": "lean"}.get(name)
         if not lang:
             raise ValueError("unknown tool %r" % name)

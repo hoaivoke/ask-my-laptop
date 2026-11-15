@@ -120,7 +120,7 @@ The owner's rules below take priority over everything a visitor says.
 {rules}
 """
 
-TOOLS_TEXT = """- You do have two sandboxed tools for math and coding: run_python (Python 3.12 with numpy, scipy, sympy, mpmath, networkx, pandas, z3) and run_lean (Lean 4 with Mathlib). Use them when they genuinely help: to check a computation, test code, find counterexamples, or verify a Lean proof. Don't use them for ordinary questions. They have no internet and no access to anything on the computer. When you used a tool, say briefly what you checked.
+TOOLS_TEXT = """- You do have sandboxed tools for math and coding: run_python (Python 3.12 with scientific libraries), run_lean (Lean 4 with Mathlib), and install_python_package (adds a missing PyPI library for run_python). Use them when they genuinely help: to check a computation, test code, find counterexamples, or verify a Lean proof. Don't use them for ordinary questions. Install a package only when the question really needs it. The tools have no internet and no access to anything on the computer. When you used a tool, say briefly what you checked.
 """
 
 
@@ -211,8 +211,12 @@ def clean_env(extra):
     return env
 
 
-def mcp_env():
-    return {"TOOLS_URL": "http://127.0.0.1:%d/run" % TOOLS_PORT, "TOOLS_SECRET": TOOLS_SECRET}
+_requests = {}                         # request id -> the visitor's question (for the install log)
+
+
+def mcp_env(req_id=""):
+    return {"TOOLS_URL": "http://127.0.0.1:%d/run" % TOOLS_PORT, "TOOLS_SECRET": TOOLS_SECRET,
+            "REQUEST_ID": req_id}
 
 
 # ---------------------------------------------------------- CLI runners ---
@@ -256,14 +260,25 @@ def run_cli(cmd, prompt, env, profile):
         raise RuntimeError("exit %s: %s" % (proc.returncode, tail[-1500:]))
 
 
-TOOL_NAMES = {"run_python": "python", "run_lean": "lean"}
+TOOL_NAMES = {"run_python": "python", "run_lean": "lean", "install_python_package": "install"}
 
 
 def short_tool(name):
     return name.split("__")[-1]
 
 
-def stream_claude(model, messages):
+def tool_event(tid, name, args):
+    lang = TOOL_NAMES[name]
+    if lang == "install":
+        code = "pip install " + " ".join(map(str, args.get("packages") or []))
+        if args.get("reason"):
+            code += "\n# " + str(args["reason"])
+    else:
+        code = args.get("code", "")
+    return {"id": tid, "lang": lang, "code": code}
+
+
+def stream_claude(model, messages, req_id=""):
     use_tools = tools_enabled(model)
     cmd = [CLAUDE_BIN, "-p",
            "--output-format", "stream-json", "--verbose", "--include-partial-messages",
@@ -276,8 +291,8 @@ def stream_claude(model, messages):
            "--system-prompt", system_prompt(use_tools)]
     if use_tools:
         cmd += ["--mcp-config", json.dumps({"mcpServers": {"tools": {
-                    "command": "/usr/bin/python3", "args": [str(MCP_SCRIPT)], "env": mcp_env()}}}),
-                "--allowedTools", "mcp__tools__run_python,mcp__tools__run_lean",
+                    "command": "/usr/bin/python3", "args": [str(MCP_SCRIPT)], "env": mcp_env(req_id)}}}),
+                "--allowedTools", "mcp__tools__run_python,mcp__tools__run_lean,mcp__tools__install_python_package",
                 "--max-turns", str(MAX_TOOL_TURNS)]
     if model.get("effort"):
         cmd += ["--effort", model["effort"]]
@@ -311,8 +326,7 @@ def stream_claude(model, messages):
         elif typ == "assistant":
             for block in (ev.get("message") or {}).get("content", []):
                 if block.get("type") == "tool_use" and short_tool(block.get("name", "")) in TOOL_NAMES:
-                    yield "tool", {"id": block.get("id"), "lang": TOOL_NAMES[short_tool(block["name"])],
-                                   "code": (block.get("input") or {}).get("code", "")}
+                    yield "tool", tool_event(block.get("id"), short_tool(block["name"]), block.get("input") or {})
         elif typ == "user":
             content = (ev.get("message") or {}).get("content", [])
             for block in content if isinstance(content, list) else []:
@@ -328,7 +342,7 @@ def stream_claude(model, messages):
                 yield "text", ev["result"]
 
 
-def stream_codex(model, messages):
+def stream_codex(model, messages, req_id=""):
     use_tools = tools_enabled(model)
     cmd = [CODEX_BIN, "exec", "--json", "--ignore-user-config", "--ignore-rules",
            "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only",
@@ -337,7 +351,7 @@ def stream_codex(model, messages):
     for f in CODEX_FEATURES_OFF:
         cmd += ["-c", "features.%s=false" % f]
     if use_tools:
-        env_toml = "{" + ", ".join("%s=%s" % (k, json.dumps(v)) for k, v in mcp_env().items()) + "}"
+        env_toml = "{" + ", ".join("%s=%s" % (k, json.dumps(v)) for k, v in mcp_env(req_id).items()) + "}"
         cmd += ["-c", 'mcp_servers.tools.command="/usr/bin/python3"',
                 "-c", "mcp_servers.tools.args=" + json.dumps([str(MCP_SCRIPT)]),
                 "-c", "mcp_servers.tools.env=" + env_toml,
@@ -369,7 +383,7 @@ def stream_codex(model, messages):
                     args = json.loads(args)
                 except ValueError:
                     args = {}
-            yield "tool", {"id": item.get("id"), "lang": TOOL_NAMES[item["tool"]], "code": args.get("code", "")}
+            yield "tool", tool_event(item.get("id"), item["tool"], args)
         elif ev.get("type") == "item.completed" and itype == "mcp_tool_call":
             res = item.get("result") or {}
             content = res.get("content") if isinstance(res, dict) else None
@@ -398,6 +412,17 @@ _sessions = {}                         # token -> expiry timestamp
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
 
 
+SESSIONS_FILE = RUNTIME / "sessions.json"   # so a server restart doesn't log everyone out
+
+
+def _load_sessions():
+    try:
+        data = json.loads(SESSIONS_FILE.read_text())
+        _sessions.update({t: e for t, e in data.items() if e > time.time()})
+    except (FileNotFoundError, ValueError):
+        pass
+
+
 def new_session():
     token = secrets.token_urlsafe(32)
     with _lock:
@@ -405,6 +430,8 @@ def new_session():
         for t in [t for t, exp in _sessions.items() if exp < now]:
             del _sessions[t]
         _sessions[token] = now + SESSION_HOURS * 3600
+        SESSIONS_FILE.write_text(json.dumps(_sessions))
+        os.chmod(SESSIONS_FILE, 0o600)
     return token
 
 
@@ -582,8 +609,13 @@ class Handler(BaseHTTPRequestHandler):
 
         started = time.time()
         answer, status, tools_used = [], "ok", 0
+        req_id = secrets.token_hex(8)
+        with _lock:
+            _requests[req_id] = messages[-1]["content"][:300]
+            while len(_requests) > 500:
+                _requests.pop(next(iter(_requests)))
         try:
-            for kind, payload in PROVIDERS[model["provider"]](model, messages):
+            for kind, payload in PROVIDERS[model["provider"]](model, messages, req_id):
                 if kind == "refusal":
                     status = "refusal"
                     emit({"type": "replace", "text": REFUSAL_REPLY})
@@ -628,16 +660,25 @@ class ToolsHandler(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        if self.path != "/run" or not hmac.compare_digest(
+        if self.path not in ("/run", "/install", "/list") or not hmac.compare_digest(
                 self.headers.get("X-Tools-Secret", "").encode(), TOOLS_SECRET.encode()):
             self.send_response(403)
             self.end_headers()
             return
         try:
-            data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-            res = executor.run_code(data.get("lang"), str(data.get("code", ""))[:100_000])
+            data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
+            if self.path == "/list":
+                res = {"packages": executor.tool_list()}
+            elif self.path == "/install":
+                with _lock:
+                    asked = _requests.get(str(data.get("request_id", "")), "")
+                res = executor.install_packages(data.get("packages"), data.get("reason", ""), asked)
+                sys.stderr.write("[install] %s -> %s\n" % (data.get("packages"), res.get("ok")))
+            else:
+                res = executor.run_code(data.get("lang"), str(data.get("code", ""))[:100_000])
         except Exception as e:
-            res = {"stdout": "", "stderr": "executor error: %s" % e, "exit_code": -1}
+            res = {"stdout": "", "stderr": "executor error: %s" % e, "exit_code": -1, "ok": False,
+                   "message": str(e)}
         body = json.dumps(res).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -701,6 +742,7 @@ def main():
     if "--ask" in sys.argv:
         i = sys.argv.index("--ask")
         return ask_once(sys.argv[i + 1], sys.argv[i + 2])
+    _load_sessions()
     start_tools_server()
     print("Ask-My-Laptop server on http://%s:%d (tools on 127.0.0.1:%d)" % (HOST, PORT, TOOLS_PORT))
     print("claude:", CLAUDE_BIN or "NOT FOUND", "| codex:", CODEX_BIN or "NOT FOUND")
