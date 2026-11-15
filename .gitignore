@@ -4,3 +4,4 @@ server/logs/
 __pycache__/
 .DS_Store
 server/rules.md
+server/runtime/
