@@ -50,7 +50,12 @@
         o.value = m.id; o.textContent = m.label; o.title = m.description || "";
         modelSel.appendChild(o);
       }
-      if (!data.models.length) throw new Error("no models");
+      if (!data.models.length) {
+        dot.className = "dot bad"; dot.title = "No models";
+        statusText.textContent = "The server is up, but no models are switched on yet.";
+        modelSel.innerHTML = "<option>No models</option>";
+        return;
+      }
       const saved = store.get("model");
       if (saved && data.models.some((m) => m.id === saved)) modelSel.value = saved;
       if (data.access_code_required) { codeInput.hidden = false; codeInput.value = store.get("code") || ""; }
